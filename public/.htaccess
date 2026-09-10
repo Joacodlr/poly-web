@@ -1,0 +1,159 @@
+# ==================================================================
+#  Manufacturas Poly — configuración de Apache (cPanel)
+#
+#  Este archivo vive en public/ y Vite lo copia a dist/ en cada build.
+#  Al subir el contenido de dist/ a public_html, viaja con el sitio:
+#  no hay que crearlo ni actualizarlo a mano.
+#
+#  Todo va dentro de <IfModule>: si el hosting no tiene alguno de los
+#  módulos, Apache lo ignora en vez de devolver un error 500.
+# ==================================================================
+
+AddDefaultCharset UTF-8
+
+# Sin listados de directorio.
+Options -Indexes
+
+# Nuestro sitio arranca en index.html. Si quedó algún index.php del
+# WordPress viejo dando vueltas, Apache lo serviría primero: esta línea
+# lo evita.
+DirectoryIndex index.html
+
+# ------------------------------------------------------------------
+#  1. Bloquear archivos que nunca deben servirse
+#     (por si alguna vez se sube un .env o un backup por error)
+# ------------------------------------------------------------------
+# `Require` es sintaxis de Apache 2.4 (lo que usa cPanel). El IfModule
+# evita un error 500 en el caso raro de un servidor 2.2.
+<IfModule mod_authz_core.c>
+  <FilesMatch "^\.|\.(env|log|bak|orig|sql|yml|yaml|ini|sh|ts|tsx|map|lock)$">
+    Require all denied
+  </FilesMatch>
+</IfModule>
+
+# Red de seguridad: si el respaldo del WordPress quedó dentro de
+# public_html, bloquear el acceso desde la web. wp-config.php tiene las
+# credenciales de la base de datos: no puede quedar alcanzable.
+# Lo correcto igual es guardarlo FUERA de public_html (ver DESPLIEGUE-CPANEL.md).
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule ^_backup_wp(/.*)?$ - [F,L]
+  RewriteRule ^wp-(admin|includes|content)(/.*)?$ - [F,L]
+  RewriteRule ^wp-config\.php$ - [F,L]
+</IfModule>
+
+# ------------------------------------------------------------------
+#  2. HTTPS obligatorio + fallback SPA
+# ------------------------------------------------------------------
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteBase /
+
+  # ---- Validación de certificados: PRIMERO QUE TODO ----
+  # AutoSSL y Let's Encrypt validan el dominio pidiendo un archivo en
+  # /.well-known/acme-challenge/ POR HTTP, antes de que exista el
+  # certificado. Si esa petición cae en el redirect a HTTPS o en el
+  # fallback SPA, la validación falla y el certificado no se emite.
+  # Esta regla la deja pasar intacta.
+  RewriteRule ^\.well-known/ - [L]
+
+  # Forzar HTTPS (301 permanente).
+  # La segunda condición evita bucles cuando cPanel está detrás de un
+  # proxy o CDN que termina el TLS antes de llegar a Apache.
+  RewriteCond %{HTTPS} !=on
+  RewriteCond %{HTTP:X-Forwarded-Proto} !=https
+  RewriteCond %{HTTP:X-Forwarded-SSL} !=on
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+  # Fallback SPA: si la ruta no es un archivo ni una carpeta real,
+  # servir index.html y dejar que React resuelva.
+  # No se toca /assets/: si un archivo con hash no existe, tiene que
+  # devolver 404 y no un HTML disfrazado de JavaScript.
+  RewriteCond %{REQUEST_URI} !^/assets/
+  RewriteCond %{REQUEST_FILENAME} !-f
+  RewriteCond %{REQUEST_FILENAME} !-d
+  RewriteRule ^ index.html [L]
+</IfModule>
+
+# ------------------------------------------------------------------
+#  3. Cabeceras de seguridad
+# ------------------------------------------------------------------
+<IfModule mod_headers.c>
+  # HTTPS obligatorio durante 2 años, subdominios incluidos.
+  # Ojo: activar SOLO cuando AutoSSL ya funcione. Ver DESPLIEGUE-CPANEL.md
+  Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "DENY"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+  Header always set Cross-Origin-Opener-Policy "same-origin"
+
+  # Content-Security-Policy — la defensa principal contra XSS.
+  #   script-src 'self'  : sólo se ejecuta JavaScript de nuestro dominio.
+  #   cdn.sanity.io      : fotos de producto subidas por el dueño.
+  #   *.sanity.io        : lectura del catálogo.
+  #   api.web3forms.com  : envío del formulario de contacto.
+  #   challenges.cloudflare.com : captcha Turnstile (inerte si no se usa).
+  #   'unsafe-inline' en style-src : algunos colores se calculan en línea
+  #                                  (el tinte de cada material).
+  Header always set Content-Security-Policy "default-src 'self'; img-src 'self' https://cdn.sanity.io data: blob:; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' https://*.sanity.io https://*.apicdn.sanity.io https://api.web3forms.com https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
+
+  # No anunciar la versión de PHP.
+  Header always unset X-Powered-By
+</IfModule>
+
+# ------------------------------------------------------------------
+#  4. Compresión
+# ------------------------------------------------------------------
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css
+  AddOutputFilterByType DEFLATE application/javascript application/x-javascript
+  AddOutputFilterByType DEFLATE application/json application/manifest+json
+  AddOutputFilterByType DEFLATE image/svg+xml
+  # Las fuentes woff2 ya vienen comprimidas: volver a comprimirlas sólo gasta CPU.
+</IfModule>
+
+<IfModule mod_brotli.c>
+  AddOutputFilterByType BROTLI_COMPRESS text/html text/css application/javascript image/svg+xml
+</IfModule>
+
+# ------------------------------------------------------------------
+#  5. Caché
+#     Vite pone un hash en el nombre de cada archivo de /assets/:
+#     si el contenido cambia, cambia el nombre. Por eso se pueden
+#     cachear un año sin miedo. El index.html nunca se cachea, y es
+#     el que apunta a los assets nuevos tras cada despliegue.
+# ------------------------------------------------------------------
+<IfModule mod_setenvif.c>
+  SetEnvIf Request_URI "^/assets/" HASHED_ASSET
+</IfModule>
+
+<IfModule mod_headers.c>
+  Header always set Cache-Control "public, max-age=31536000, immutable" env=HASHED_ASSET
+
+  <FilesMatch "\.html$">
+    Header always set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+
+  # favicon, robots, iconos sueltos: un día está bien.
+  <FilesMatch "\.(ico|svg|png|jpg|jpeg|webp|txt|xml)$">
+    Header always set Cache-Control "public, max-age=86400"
+  </FilesMatch>
+</IfModule>
+
+# ------------------------------------------------------------------
+#  6. Tipos MIME que algunos cPanel viejos no traen
+# ------------------------------------------------------------------
+<IfModule mod_mime.c>
+  AddType application/javascript          .js .mjs
+  AddType font/woff2                      .woff2
+  AddType image/svg+xml                   .svg
+  AddType application/manifest+json       .webmanifest
+</IfModule>
+
+# Nota: a propósito NO hay `ErrorDocument 404 /index.html`.
+# El fallback SPA de arriba ya sirve el sitio en cualquier ruta que no
+# sea un archivo real. Si además redirigiéramos los 404, un archivo de
+# /assets/ que faltara devolvería HTML con Content-Type de JavaScript
+# y el navegador tiraría un error confuso en vez de un 404 claro.
