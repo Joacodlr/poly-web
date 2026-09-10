@@ -21,6 +21,6 @@
   "devDependencies": {
     "@sanity/vision": "^6.13.0",
     "@types/react": "^19.2.18",
-    "typescript": "~6.0.2"
+    "typescript": "~7.0.2"
   }
 }
